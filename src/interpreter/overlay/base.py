@@ -4,8 +4,8 @@ Platform-specific implementations inherit from these base classes.
 macOS and Windows use PySide6, Linux uses Tkinter (separate implementation).
 """
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
 from .. import log
@@ -242,6 +242,54 @@ class BannerOverlayBase(QWidget):
             event.accept()
 
 
+class VerticalLabel(QWidget):
+    """Widget that draws text rotated 90° clockwise (reads top-to-bottom).
+
+    Used for translations of vertical Japanese text so the overlay matches
+    the tall, narrow shape of the original region.
+    """
+
+    # Padding matches the horizontal labels' stylesheet: 8px along the text, 4px across
+    PAD_ALONG = 8
+    PAD_ACROSS = 4
+
+    def __init__(
+        self,
+        text: str,
+        font: QFont,
+        font_color: str,
+        background_rgba: tuple[int, int, int, int],
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._text = text
+        self._font = font
+        self._font_color = font_color
+        self._background_rgba = background_rgba
+        metrics = QFontMetrics(font)
+        self.resize(
+            metrics.height() + 2 * self.PAD_ACROSS,
+            metrics.horizontalAdvance(text) + 2 * self.PAD_ALONG,
+        )
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(*self._background_rgba))
+        painter.drawRoundedRect(self.rect(), 4, 4)
+        # Rotate 90° clockwise: x now runs down the widget, y runs left
+        painter.translate(self.width(), 0)
+        painter.rotate(90)
+        painter.setFont(self._font)
+        painter.setPen(QColor(self._font_color))
+        painter.drawText(
+            QRect(0, 0, self.height(), self.width()),
+            Qt.AlignmentFlag.AlignCenter,
+            self._text,
+        )
+
+
 class InplaceOverlayBase(QWidget):
     """Transparent overlay for inplace text display.
 
@@ -262,12 +310,13 @@ class InplaceOverlayBase(QWidget):
         background_opacity: float = 0.8,
     ):
         super().__init__()
-        self._labels: list[QLabel] = []
+        self._labels: list[QWidget] = []
         self._font_family = font_family  # None = system default
         self._font_size = font_size
         self._font_color = font_color
         self._background_color = background_color
         self._background_opacity = background_opacity
+        self._vertical_text = False
         self._last_regions: list[tuple[str, dict]] = []
         self._last_content_offset: tuple[int, int] = (0, 0)
         self._setup_window()
@@ -335,23 +384,28 @@ class InplaceOverlayBase(QWidget):
 
         self._clear_labels()
 
+        # Convert hex background color to rgba with configurable transparency
+        bg_color = self._background_color.lstrip("#")
+        r, g, b = int(bg_color[0:2], 16), int(bg_color[2:4], 16), int(bg_color[4:6], 16)
+        a = int(self._background_opacity * 255)
+
         # Create new labels
         for text, bbox in regions:
             if not bbox:
                 continue
-            label = QLabel(text, self)
-            label.setFont(self._create_font())
-            # Convert hex background color to rgba with configurable transparency
-            bg_color = self._background_color.lstrip("#")
-            r, g, b = int(bg_color[0:2], 16), int(bg_color[2:4], 16), int(bg_color[4:6], 16)
-            a = int(self._background_opacity * 255)
-            label.setStyleSheet(
-                f"color: {self._font_color}; "
-                f"background-color: rgba({r}, {g}, {b}, {a}); "
-                "padding: 4px 8px; "
-                "border-radius: 4px;"
-            )
-            label.adjustSize()
+            if self._vertical_text and bbox.get("height", 0) > bbox.get("width", 0):
+                # Tall, narrow region = vertical source text: rotate the translation
+                label = VerticalLabel(text, self._create_font(), self._font_color, (r, g, b, a), self)
+            else:
+                label = QLabel(text, self)
+                label.setFont(self._create_font())
+                label.setStyleSheet(
+                    f"color: {self._font_color}; "
+                    f"background-color: rgba({r}, {g}, {b}, {a}); "
+                    "padding: 4px 8px; "
+                    "border-radius: 4px;"
+                )
+                label.adjustSize()
             # Position at bbox location, converting from pixels to points
             # OCR returns coordinates in captured image pixels (physical pixels)
             # Qt uses logical pixels (points), so divide by scale factor
@@ -405,6 +459,12 @@ class InplaceOverlayBase(QWidget):
     def set_opacity(self, opacity: float):
         """Update the background opacity (0.0-1.0) and re-render immediately."""
         self._background_opacity = opacity
+        if self._last_regions:
+            self.set_regions(self._last_regions, self._last_content_offset)
+
+    def set_vertical_text(self, enabled: bool):
+        """Enable/disable rotated display over vertical text regions and re-render."""
+        self._vertical_text = enabled
         if self._last_regions:
             self.set_regions(self._last_regions, self._last_content_offset)
 

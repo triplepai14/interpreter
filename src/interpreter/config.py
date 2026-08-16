@@ -52,6 +52,7 @@ class Config:
         banner_y: int | None = None,
         exclusion_zones: dict | None = None,
         ocr_confidence_per_window: dict | None = None,
+        vertical_text: bool = False,
     ):
         self.window_title = window_title
         self.ocr_confidence = ocr_confidence  # Global default
@@ -69,6 +70,8 @@ class Config:
         self.exclusion_zones = exclusion_zones if exclusion_zones is not None else {}
         # Per-window OCR confidence: {"window_title": 0.55, ...}
         self.ocr_confidence_per_window = ocr_confidence_per_window if ocr_confidence_per_window is not None else {}
+        # Inplace mode: render translations rotated 90° over vertical (tall) text regions
+        self.vertical_text = vertical_text
 
     @classmethod
     def load(cls, config_path: str | None = None) -> "Config":
@@ -127,6 +130,7 @@ class Config:
                 banner_y=data.get("banner_y"),
                 exclusion_zones=data.get("exclusion_zones", {}),
                 ocr_confidence_per_window=data.get("ocr_confidence_per_window", {}),
+                vertical_text=bool(data.get("vertical_text", False)),
             )
 
         # No config file found - create default in home directory
@@ -261,6 +265,7 @@ hotkeys:
             "font_color": str(self.font_color),
             "background_color": str(self.background_color),
             "background_opacity": float(self.background_opacity),
+            "vertical_text": bool(self.vertical_text),
             "hotkeys": {str(k): str(v) for k, v in self.hotkeys.items()},
         }
         # Only save font_family if user has chosen one (None = system default)

@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QFontDialog,
@@ -115,6 +116,7 @@ class MainWindow(QMainWindow):
             background_color=config.background_color,
             background_opacity=config.background_opacity,
         )
+        self._inplace_overlay.set_vertical_text(config.vertical_text)
 
         # Apply saved banner position if available
         if config.banner_x is not None and config.banner_y is not None:
@@ -267,6 +269,15 @@ class MainWindow(QMainWindow):
         self._mode_hotkey.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._mode_hotkey.keySequenceChanged.connect(self._on_mode_hotkey_changed)
         mode_row.addWidget(self._mode_hotkey)
+
+        # Vertical text option (inplace mode): rotate translations over vertical Japanese text
+        self._vertical_check = QCheckBox("Vertical text")
+        self._vertical_check.setChecked(self._config.vertical_text)
+        self._vertical_check.setToolTip(
+            "Display translations rotated 90° over vertical Japanese text (inplace mode)"
+        )
+        self._vertical_check.toggled.connect(self._on_vertical_text_changed)
+        mode_row.addWidget(self._vertical_check)
 
         # Wayland limitation warning (only shown on Wayland)
         if self._is_wayland_session:
@@ -1035,6 +1046,10 @@ class MainWindow(QMainWindow):
             self._ocr_config_dialog.update_ocr_results(results)
 
     # Settings handlers
+    def _on_vertical_text_changed(self, checked: bool):
+        self._config.vertical_text = checked
+        self._inplace_overlay.set_vertical_text(checked)
+
     def _on_font_size_changed(self, value: int):
         self._config.font_size = value
         self._font_label.setText(f"{value}pt")
