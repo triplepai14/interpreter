@@ -31,12 +31,12 @@ Offline screen translator for Japanese retro games. Captures text from any windo
 
 **macOS/Linux:**
 ```bash
-curl -LsSf https://raw.githubusercontent.com/bquenin/interpreter/main/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/triplepai14/interpreter/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/bquenin/interpreter/main/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/triplepai14/interpreter/main/install.ps1 | iex"
 ```
 
 Then run with `interpreter-v2`.
@@ -49,12 +49,12 @@ To update to the latest version, run the installer again (see Installation above
 
 **macOS/Linux:**
 ```bash
-curl -LsSf https://raw.githubusercontent.com/bquenin/interpreter/main/uninstall.sh | bash
+curl -LsSf https://raw.githubusercontent.com/triplepai14/interpreter/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/bquenin/interpreter/main/uninstall.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/triplepai14/interpreter/main/uninstall.ps1 | iex"
 ```
 
 This removes interpreter-v2, config files, and cached models.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # install.sh - One-liner installer for interpreter-v2
-# Usage: curl -LsSf https://raw.githubusercontent.com/bquenin/interpreter/main/install.sh | bash
+# Usage: curl -LsSf https://raw.githubusercontent.com/triplepai14/interpreter/main/install.sh | bash
 
 set -e
 
@@ -42,11 +42,18 @@ else
 	echo -e "${GREEN}[1/${TOTAL_STEPS}] uv is already installed${NC}"
 fi
 
-# Install or upgrade interpreter-v2
-echo -e "${YELLOW}[2/${TOTAL_STEPS}] Installing interpreter-v2 from PyPI...${NC}"
+# Install or upgrade interpreter-v2 from the triplepai14 fork on GitHub
+# (PyPI hosts the upstream package, not this fork's changes)
+REPO="triplepai14/interpreter"
+SOURCE="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
+TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+if [ -n "$TAG" ]; then
+	SOURCE="https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz"
+fi
+echo -e "${YELLOW}[2/${TOTAL_STEPS}] Installing interpreter-v2 from GitHub ($REPO)...${NC}"
 echo -e "${GRAY}     (this may take a minute on first install)${NC}"
 # Use Python 3.12 - uv-managed Python includes tkinter, system Python 3.13+ often doesn't
-if ! uv tool install --upgrade --python 3.12 interpreter-v2 2>&1; then
+if ! uv tool install --force --python 3.12 --from "$SOURCE" interpreter-v2 2>&1; then
 	echo ""
 	echo -e "${RED}Installation failed!${NC}"
 	echo -e "${YELLOW}This may be due to missing dependencies. Try:${NC}"

@@ -1,5 +1,5 @@
 # install.ps1 - One-liner installer for interpreter-v2
-# Usage: powershell -c "irm https://raw.githubusercontent.com/bquenin/interpreter/main/install.ps1 | iex"
+# Usage: powershell -c "irm https://raw.githubusercontent.com/triplepai14/interpreter/main/install.ps1 | iex"
 
 $ErrorActionPreference = 'Stop'
 
@@ -32,13 +32,20 @@ if (-not $uvPath) {
     Write-Host "[1/2] uv is already installed" -ForegroundColor Green
 }
 
-# Install or upgrade interpreter-v2
-Write-Host "[2/3] Installing interpreter-v2 from PyPI..." -ForegroundColor Yellow
+# Install or upgrade interpreter-v2 from the triplepai14 fork on GitHub
+# (PyPI hosts the upstream package, not this fork's changes)
+$repo = "triplepai14/interpreter"
+$source = "https://github.com/$repo/archive/refs/heads/main.tar.gz"
+try {
+    $tag = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").tag_name
+    if ($tag) { $source = "https://github.com/$repo/archive/refs/tags/$tag.tar.gz" }
+} catch {}
+Write-Host "[2/3] Installing interpreter-v2 from GitHub ($repo)..." -ForegroundColor Yellow
 Write-Host "     (this may take a minute on first install)" -ForegroundColor Gray
 # Use Python 3.12 explicitly - onnxruntime doesn't have wheels for 3.14 yet
 # Temporarily allow errors so uv's progress output (on stderr) doesn't stop the script
 $ErrorActionPreference = 'Continue'
-uv tool install --force --upgrade --python 3.12 interpreter-v2
+uv tool install --force --python 3.12 --from $source interpreter-v2
 $installExitCode = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if ($installExitCode -ne 0) {
