@@ -281,6 +281,21 @@ class MainWindow(QMainWindow):
         self._mode_hotkey.keySequenceChanged.connect(self._on_mode_hotkey_changed)
         mode_row.addWidget(self._mode_hotkey)
 
+        # Translation direction (ja->en for games/manga, en->ja e.g. for Live Captions)
+        self._direction_combo = QComboBox()
+        self._direction_combo.addItem("JA → EN", "ja-en")
+        self._direction_combo.addItem("EN → JA", "en-ja")
+        if self._config.translation_direction == "en-ja":
+            self._direction_combo.setCurrentIndex(1)
+        self._direction_combo.setToolTip(
+            "Translation direction.\n"
+            "JA → EN: Japanese games/manga to English.\n"
+            "EN → JA: English text (e.g. Windows Live Captions) to Japanese.\n"
+            "Switching downloads the model on first use (~2.4GB for EN → JA)."
+        )
+        self._direction_combo.currentIndexChanged.connect(self._on_direction_changed)
+        mode_row.addWidget(self._direction_combo)
+
         # Vertical text option (inplace mode): wrap translations over vertical Japanese text
         self._vertical_check = QCheckBox("Vertical text")
         self._vertical_check.setChecked(self._config.vertical_text)
@@ -486,6 +501,7 @@ class MainWindow(QMainWindow):
         """Start worker thread and load OCR/translation models."""
         self.statusBar().showMessage("Loading models...")
         self._process_worker.set_mode(self._mode)
+        self._process_worker.set_direction(self._config.translation_direction)
         self._process_worker.start(self._config.ocr_confidence)
 
     def _on_models_ready(self):
@@ -581,6 +597,7 @@ class MainWindow(QMainWindow):
         self._process_worker.ocr_status.connect(self._on_ocr_status)
         self._process_worker.translation_status.connect(self._on_translation_status)
         self._process_worker.set_mode(self._mode)
+        self._process_worker.set_direction(self._config.translation_direction)
         self._process_worker.start(self._config.ocr_confidence)
 
     def _refresh_windows(self):
@@ -1134,6 +1151,14 @@ class MainWindow(QMainWindow):
             self._ocr_config_dialog.update_ocr_results(results)
 
     # Settings handlers
+    def _on_direction_changed(self, index: int):
+        direction = self._direction_combo.currentData()
+        self._config.translation_direction = direction
+        self._process_worker.set_direction(direction)
+        self.statusBar().showMessage(
+            "Switching translation direction... (first use downloads the model)"
+        )
+
     def _on_vertical_text_changed(self, checked: bool):
         self._config.vertical_text = checked
         self._inplace_overlay.set_vertical_text(checked)

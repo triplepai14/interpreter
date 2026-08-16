@@ -53,6 +53,7 @@ class Config:
         exclusion_zones: dict | None = None,
         ocr_confidence_per_window: dict | None = None,
         vertical_text: bool = False,
+        translation_direction: str = "ja-en",
     ):
         self.window_title = window_title
         self.ocr_confidence = ocr_confidence  # Global default
@@ -72,6 +73,8 @@ class Config:
         self.ocr_confidence_per_window = ocr_confidence_per_window if ocr_confidence_per_window is not None else {}
         # Inplace mode: wrap translations into a multi-line block over vertical (tall) text regions
         self.vertical_text = vertical_text
+        # Translation direction: "ja-en" (games/manga) or "en-ja" (e.g. Windows Live Captions)
+        self.translation_direction = translation_direction if translation_direction in ("ja-en", "en-ja") else "ja-en"
 
     @classmethod
     def load(cls, config_path: str | None = None) -> "Config":
@@ -131,6 +134,7 @@ class Config:
                 exclusion_zones=data.get("exclusion_zones", {}),
                 ocr_confidence_per_window=data.get("ocr_confidence_per_window", {}),
                 vertical_text=bool(data.get("vertical_text", False)),
+                translation_direction=str(data.get("translation_direction", "ja-en")),
             )
 
         # No config file found - create default in home directory
@@ -266,6 +270,7 @@ hotkeys:
             "background_color": str(self.background_color),
             "background_opacity": float(self.background_opacity),
             "vertical_text": bool(self.vertical_text),
+            "translation_direction": str(self.translation_direction),
             "hotkeys": {str(k): str(v) for k, v in self.hotkeys.items()},
         }
         # Only save font_family if user has chosen one (None = system default)

@@ -1,4 +1,4 @@
-"""Translation module using Sugoi V4 for offline Japanese to English."""
+"""Offline translation module (Sugoi V4 ja->en, NLLB-200 en->ja)."""
 
 import os
 import sys
@@ -18,14 +18,26 @@ from .models import ModelLoadError
 
 logger = log.get_logger()
 
-# Official HuggingFace repository for Sugoi V4
-SUGOI_REPO_ID = "entai2965/sugoi-v4-ja-en-ctranslate2"
-
-# Required files that must exist for the model to work
-REQUIRED_MODEL_FILES = [
-    "model.bin",
-    "spm/spm.ja.nopretok.model",
-]
+# Translation models per direction. Sugoi V4 is a dedicated ja->en model;
+# NLLB-200 (distilled 600M) handles en->ja with language tokens.
+MODEL_SPECS = {
+    "ja-en": {
+        "repo_id": "entai2965/sugoi-v4-ja-en-ctranslate2",
+        "required_files": ["model.bin", "spm/spm.ja.nopretok.model"],
+        "tokenizer_file": "spm/spm.ja.nopretok.model",
+        "source_token": None,
+        "target_token": None,
+        "compute_type": None,  # model is already quantized appropriately
+    },
+    "en-ja": {
+        "repo_id": "entai2965/nllb-200-distilled-600M-ctranslate2",
+        "required_files": ["model.bin", "sentencepiece.bpe.model"],
+        "tokenizer_file": "sentencepiece.bpe.model",
+        "source_token": "eng_Latn",
+        "target_token": "jpn_Jpan",
+        "compute_type": "int8",  # model ships float32 (2.4GB); int8 keeps RAM/CPU sane
+    },
+}
 
 # Translation cache defaults
 DEFAULT_CACHE_SIZE = 200  # Max cached translations
@@ -54,27 +66,32 @@ def _get_short_path(path: Path) -> str:
     return str(path)
 
 
-def _validate_model_files(model_path: Path) -> bool:
+def _validate_model_files(model_path: Path, required_files: list[str]) -> bool:
     """Check if all required model files exist.
 
     Args:
         model_path: Path to the model directory.
+        required_files: Relative paths that must exist.
 
     Returns:
         True if all required files exist, False otherwise.
     """
-    for file_path in REQUIRED_MODEL_FILES:
+    for file_path in required_files:
         if not (model_path / file_path).exists():
             logger.warning("missing model file", file=file_path)
             return False
     return True
 
 
-def _get_sugoi_model_path() -> Path:
-    """Get path to Sugoi V4 translation model, downloading if needed.
+def _get_model_path(repo_id: str, required_files: list[str]) -> Path:
+    """Get path to a translation model, downloading if needed.
 
-    Downloads from official HuggingFace source on first use.
+    Downloads from HuggingFace on first use.
     Model is cached in standard HuggingFace cache (~/.cache/huggingface/).
+
+    Args:
+        repo_id: HuggingFace repository id.
+        required_files: Files that must exist for the model to work.
 
     Returns:
         Path to the model directory.
@@ -85,12 +102,12 @@ def _get_sugoi_model_path() -> Path:
     # First try to load from cache (no network request)
     try:
         model_path = snapshot_download(
-            repo_id=SUGOI_REPO_ID,
+            repo_id=repo_id,
             local_files_only=True,
         )
         model_path = Path(model_path)
         # Validate that required files exist
-        if _validate_model_files(model_path):
+        if _validate_model_files(model_path, required_files):
             return model_path
         # Files missing - raise error (UI will show "Fix Models" button)
         raise ModelLoadError(
@@ -100,11 +117,11 @@ def _get_sugoi_model_path() -> Path:
         pass
 
     # Not cached, download from HuggingFace
-    logger.info("downloading sugoi v4 model", size="~1.1GB")
-    model_path = Path(snapshot_download(repo_id=SUGOI_REPO_ID))
+    logger.info("downloading translation model", repo=repo_id)
+    model_path = Path(snapshot_download(repo_id=repo_id))
 
     # Validate download completed successfully
-    if not _validate_model_files(model_path):
+    if not _validate_model_files(model_path, required_files):
         raise ModelLoadError(
             "Translation model download incomplete. Click 'Fix Models' to retry."
         )
@@ -193,19 +210,28 @@ class TranslationCache:
 
 
 class Translator:
-    """Translates Japanese text to English using Sugoi V4 (CTranslate2)."""
+    """Offline translator (CTranslate2).
+
+    Directions: "ja-en" (Sugoi V4) and "en-ja" (NLLB-200 distilled 600M).
+    """
 
     def __init__(
         self,
+        direction: str = "ja-en",
         cache_size: int = DEFAULT_CACHE_SIZE,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     ):
         """Initialize the translator (lazy loading).
 
         Args:
+            direction: Translation direction, one of MODEL_SPECS keys.
             cache_size: Maximum number of translations to cache.
             similarity_threshold: Minimum similarity for fuzzy cache match (0.0-1.0).
         """
+        if direction not in MODEL_SPECS:
+            raise ValueError(f"unknown translation direction: {direction}")
+        self.direction = direction
+        self._spec = MODEL_SPECS[direction]
         self._model_path = None
         self._translator = None
         self._tokenizer = None
@@ -220,13 +246,17 @@ class Translator:
         if self._translator is not None:
             return
 
-        logger.info("loading sugoi v4")
+        logger.info("loading translation model", direction=self.direction)
 
         import ctranslate2
         import sentencepiece as spm
 
         # Get model path (downloads from HuggingFace if needed)
-        self._model_path = _get_sugoi_model_path()
+        self._model_path = _get_model_path(self._spec["repo_id"], self._spec["required_files"])
+
+        load_kwargs = {}
+        if self._spec["compute_type"]:
+            load_kwargs["compute_type"] = self._spec["compute_type"]
 
         # Load CTranslate2 model with GPU if available, fallback to CPU
         device = "cpu"
@@ -237,6 +267,7 @@ class Translator:
                 self._translator = ctranslate2.Translator(
                     _get_short_path(self._model_path),
                     device="cuda",
+                    **load_kwargs,
                 )
                 # Test inference to verify CUDA actually works
                 # (loading may succeed but inference can fail if cuBLAS is missing)
@@ -250,16 +281,34 @@ class Translator:
             self._translator = ctranslate2.Translator(
                 _get_short_path(self._model_path),
                 device="cpu",
+                **load_kwargs,
             )
 
         # Load SentencePiece tokenizer
         # Read model as bytes to avoid Unicode path issues on Windows
         # (SentencePiece's C++ layer may not handle non-ASCII paths correctly)
-        tokenizer_path = self._model_path / "spm" / "spm.ja.nopretok.model"
+        tokenizer_path = self._model_path / self._spec["tokenizer_file"]
         self._tokenizer = spm.SentencePieceProcessor(model_proto=tokenizer_path.read_bytes())
 
         device_info = "GPU" if device == "cuda" else "CPU"
-        logger.info("sugoi v4 ready", device=device_info)
+        logger.info("translation model ready", direction=self.direction, device=device_info)
+
+    def _encode(self, text: str) -> list[str]:
+        """Tokenize source text, adding language tokens if the model needs them."""
+        pieces = self._tokenizer.EncodeAsPieces(text)
+        if self._spec["source_token"]:
+            return [self._spec["source_token"], *pieces, "</s>"]
+        return pieces
+
+    def _decode(self, tokens: list[str]) -> str:
+        """Decode output tokens to text."""
+        if self._spec["target_token"]:
+            specials = {self._spec["target_token"], self._spec["source_token"], "</s>"}
+            tokens = [t for t in tokens if t not in specials]
+            return self._tokenizer.DecodePieces(tokens).strip()
+        # Sugoi path: join tokens, clean up SentencePiece markers, normalize
+        result = "".join(tokens).replace("▁", " ").strip()
+        return _normalize_output(result)
 
     def translate(self, text: str) -> tuple[str, bool]:
         """Translate Japanese text to English.
@@ -305,18 +354,19 @@ class Translator:
                 self.load()
 
             # Tokenize inputs and translate them all in one batch
-            token_batch = [self._tokenizer.EncodeAsPieces(texts[i]) for i in miss_indices]
+            token_batch = [self._encode(texts[i]) for i in miss_indices]
+            target_prefix = None
+            if self._spec["target_token"]:
+                target_prefix = [[self._spec["target_token"]]] * len(token_batch)
             batch_results = self._translator.translate_batch(
                 token_batch,
+                target_prefix=target_prefix,
                 beam_size=5,
                 max_decoding_length=256,
             )
 
             for i, batch_result in zip(miss_indices, batch_results):
-                # Decode output - join tokens and clean up SentencePiece markers
-                translated_tokens = batch_result.hypotheses[0]
-                result = "".join(translated_tokens).replace("▁", " ").strip()
-                result = _normalize_output(result)
+                result = self._decode(batch_result.hypotheses[0])
 
                 # Store in cache
                 self._cache.put(texts[i], result)

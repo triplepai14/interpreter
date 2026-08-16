@@ -1,6 +1,6 @@
 [project]
 name = "interpreter-v2"
-version = "2.19.3"
+version = "2.20.0"
 description = "Offline screen translator for Japanese retro games"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -14,6 +14,8 @@ dependencies = [
     # OCR
     "meikiocr",
     "onnxruntime",
+    # OCR for Latin text (en->ja direction, e.g. Windows Live Captions)
+    "rapidocr-onnxruntime",
     # Translation (Sugoi V4)
     "ctranslate2",
     "sentencepiece",

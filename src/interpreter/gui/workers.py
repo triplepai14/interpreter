@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Signal
 
 from .. import log
 from ..config import OverlayMode
-from ..ocr import OCR
+from ..ocr import OCR, LatinOCR
 from ..translate import Translator
 
 logger = log.get_logger()
@@ -99,6 +99,8 @@ class ProcessWorker(QObject):
         self._translator: Translator | None = None
         self._mode = OverlayMode.BANNER
         self._confidence_threshold = 0.6
+        self._direction = "ja-en"
+        self._pending_direction: str | None = None
 
         # Track which models failed (for "Fix Models" button)
         self._ocr_failed = False
@@ -112,6 +114,25 @@ class ProcessWorker(QObject):
     def set_mode(self, mode: OverlayMode):
         """Set the overlay mode."""
         self._mode = mode
+
+    def set_direction(self, direction: str):
+        """Set the translation direction ("ja-en" or "en-ja").
+
+        If the worker is already running, the OCR engine and translation
+        model are swapped on the worker thread before the next frame.
+        """
+        self._pending_direction = direction
+
+    def _create_ocr(self) -> OCR:
+        """Create the OCR engine matching the current direction."""
+        ocr_class = LatinOCR if self._direction == "en-ja" else OCR
+        return ocr_class(confidence_threshold=self._confidence_threshold)
+
+    def _should_translate(self, text: str) -> bool:
+        """Check whether text is in the current source language."""
+        if self._direction == "en-ja":
+            return any(c.isascii() and c.isalpha() for c in text) and not contains_japanese(text)
+        return contains_japanese(text)
 
     def set_confidence_threshold(self, threshold: float):
         """Set the OCR confidence threshold."""
@@ -161,31 +182,12 @@ class ProcessWorker(QObject):
         """Worker thread main loop."""
         logger.debug("worker thread starting")
 
-        # Load OCR model
-        self.ocr_status.emit("loading")
-        try:
-            self._ocr = OCR(confidence_threshold=self._confidence_threshold)
-            self._ocr.load()
-            self._ocr_failed = False
-            self.ocr_status.emit("ready")
-            logger.debug("OCR model loaded")
-        except Exception as e:
-            self._ocr_failed = True
-            self.ocr_status.emit("error")
-            logger.error("failed to load OCR model", error=str(e))
+        # Apply direction chosen before startup
+        if self._pending_direction:
+            self._direction = self._pending_direction
+            self._pending_direction = None
 
-        # Load translation model
-        self.translation_status.emit("loading")
-        try:
-            self._translator = Translator()
-            self._translator.load()
-            self._translation_failed = False
-            self.translation_status.emit("ready")
-            logger.debug("translation model loaded")
-        except Exception as e:
-            self._translation_failed = True
-            self.translation_status.emit("error")
-            logger.error("failed to load translation model", error=str(e))
+        self._load_direction_models()
 
         # Emit overall status
         if self._ocr_failed or self._translation_failed:
@@ -196,11 +198,43 @@ class ProcessWorker(QObject):
         # Only process frames if both models loaded successfully
         if not self._ocr_failed and not self._translation_failed:
             while self._running:
+                # Swap models if the translation direction changed
+                pending = self._pending_direction
+                if pending and pending != self._direction:
+                    self._pending_direction = None
+                    self._direction = pending
+                    self._load_direction_models()
                 item = self._frame_buffer.get(timeout=0.5)
                 if item is not None:
                     self._process_frame(*item)
 
         logger.debug("worker thread stopped")
+
+    def _load_direction_models(self):
+        """Load (or reload) the OCR engine and translator for the current direction."""
+        self.ocr_status.emit("loading")
+        try:
+            self._ocr = self._create_ocr()
+            self._ocr.load()
+            self._ocr_failed = False
+            self.ocr_status.emit("ready")
+            logger.debug("OCR model loaded", direction=self._direction)
+        except Exception as e:
+            self._ocr_failed = True
+            self.ocr_status.emit("error")
+            logger.error("failed to load OCR model", error=str(e))
+
+        self.translation_status.emit("loading")
+        try:
+            self._translator = Translator(direction=self._direction)
+            self._translator.load()
+            self._translation_failed = False
+            self.translation_status.emit("ready")
+            logger.debug("translation model loaded", direction=self._direction)
+        except Exception as e:
+            self._translation_failed = True
+            self.translation_status.emit("error")
+            logger.error("failed to load translation model", error=str(e))
 
     def _process_frame(self, frame, sample=None):
         """Process a frame through OCR and translation."""
@@ -235,9 +269,9 @@ class ProcessWorker(QObject):
                 self.text_ready.emit("")
             return
 
-        # Skip translation for non-Japanese text
-        if not contains_japanese(text):
-            logger.debug("skipping translation - no Japanese characters detected")
+        # Skip translation when the text is not in the source language
+        if not self._should_translate(text):
+            logger.debug("skipping translation - no source-language text detected")
             if self._mode == OverlayMode.INPLACE:
                 self.regions_ready.emit([], sample)
             else:
@@ -250,9 +284,9 @@ class ProcessWorker(QObject):
             translated_regions = []
             all_cached = True
 
-            # Skip non-Japanese regions, then translate the rest as one batch
+            # Skip regions not in the source language, translate the rest as one batch
             jp_regions = [
-                r for r in regions if r.text and contains_japanese(r.text)
+                r for r in regions if r.text and self._should_translate(r.text)
             ]
             if self._translator and jp_regions:
                 try:

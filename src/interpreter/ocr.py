@@ -30,6 +30,11 @@ def _char_size(bbox: list) -> int:
     return min(bbox[2] - bbox[0], bbox[3] - bbox[1])
 
 
+def _contains_cjk(text: str) -> bool:
+    """Check if text contains CJK/kana characters (no-space scripts)."""
+    return any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in text)
+
+
 def _is_kana_only(text: str) -> bool:
     """Check if text consists only of hiragana/katakana (ignoring punctuation)."""
     chars = [c for c in text if c not in PUNCTUATION and not c.isspace()]
@@ -252,10 +257,21 @@ class OCR:
             if vertical_lines * 2 > len(cluster):
                 cluster.sort(key=lambda line: -line["bbox"][2])
             else:
-                cluster.sort(key=lambda line: line["bbox"][1])
+                # Row-then-x order: fragments of the same visual row must sort
+                # left-to-right, not by their slightly different y coordinates
+                heights = [line["bbox"][3] - line["bbox"][1] for line in cluster]
+                row_height = max(1.0, sum(heights) / len(heights))
+                cluster.sort(
+                    key=lambda line: (
+                        int((line["bbox"][1] + line["bbox"][3]) / 2 / row_height),
+                        line["bbox"][0],
+                    )
+                )
 
-            # Combine text from lines
-            text = "".join(line["text"] for line in cluster)
+            # Combine text from lines. Japanese joins without spaces; Latin
+            # text (e.g. English subtitles) needs a space between lines.
+            separator = "" if any(_contains_cjk(line["text"]) for line in cluster) else " "
+            text = separator.join(line["text"] for line in cluster)
             text = self._clean_text(text)
 
             if not text:
@@ -382,6 +398,10 @@ class OCR:
 
         return clusters
 
+    def is_loaded(self) -> bool:
+        """Check if the model is loaded."""
+        return self._model is not None
+
     def _clean_text(self, text: str) -> str:
         """Clean extracted text.
 
@@ -402,10 +422,54 @@ class OCR:
 
         return text
 
-    def is_loaded(self) -> bool:
-        """Check if the model is loaded.
+
+class LatinOCR(OCR):
+    """OCR for Latin-script text (e.g. English subtitles) using RapidOCR.
+
+    MeikiOCR is trained on Japanese text and drops spaces and characters in
+    English text; RapidOCR (PaddleOCR models) reads Latin text reliably.
+    Used for the en->ja translation direction (e.g. Windows Live Captions).
+    """
+
+    def load(self) -> None:
+        """Load the RapidOCR model.
+
+        Raises:
+            Exception: If model fails to load.
+        """
+        if self._model is not None:
+            return
+
+        logger.info("loading rapidocr")
+        from rapidocr_onnxruntime import RapidOCR
+
+        self._model = RapidOCR()
+        logger.info("rapidocr ready")
+
+    def _run_ocr_and_filter(self, image: NDArray[np.uint8]) -> list[dict]:
+        """Run RapidOCR and filter results by confidence threshold.
+
+        Args:
+            image: Numpy array (H, W, 4) in BGRA format.
 
         Returns:
-            True if model is loaded, False otherwise.
+            List of line dicts: [{"text": str, "bbox": [x1, y1, x2, y2]}, ...]
         """
-        return self._model is not None
+        if self._model is None:
+            self.load()
+
+        img_array = bgra_to_rgb(image)
+        result, _ = self._model(img_array)
+
+        lines = []
+        for box, text, score in result or []:
+            if not text or float(score) < self._confidence_threshold:
+                continue
+            xs = [point[0] for point in box]
+            ys = [point[1] for point in box]
+            bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+            if bbox[0] < 0 or bbox[1] < 0 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                continue
+            lines.append({"text": text, "bbox": bbox})
+
+        return self._deduplicate_lines(lines)
