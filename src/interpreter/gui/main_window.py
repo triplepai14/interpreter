@@ -270,11 +270,12 @@ class MainWindow(QMainWindow):
         self._mode_hotkey.keySequenceChanged.connect(self._on_mode_hotkey_changed)
         mode_row.addWidget(self._mode_hotkey)
 
-        # Vertical text option (inplace mode): rotate translations over vertical Japanese text
+        # Vertical text option (inplace mode): wrap translations over vertical Japanese text
         self._vertical_check = QCheckBox("Vertical text")
         self._vertical_check.setChecked(self._config.vertical_text)
         self._vertical_check.setToolTip(
-            "Display translations rotated 90° over vertical Japanese text (inplace mode)"
+            "Wrap translations into multiple lines over vertical Japanese text\n"
+            "so long sentences stay inside the frame (inplace mode)"
         )
         self._vertical_check.toggled.connect(self._on_vertical_text_changed)
         mode_row.addWidget(self._vertical_check)

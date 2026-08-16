@@ -4,8 +4,8 @@ Platform-specific implementations inherit from these base classes.
 macOS and Windows use PySide6, Linux uses Tkinter (separate implementation).
 """
 
-from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
 from .. import log
@@ -242,52 +242,20 @@ class BannerOverlayBase(QWidget):
             event.accept()
 
 
-class VerticalLabel(QWidget):
-    """Widget that draws text rotated 90° clockwise (reads top-to-bottom).
-
-    Used for translations of vertical Japanese text so the overlay matches
-    the tall, narrow shape of the original region.
-    """
-
-    # Padding matches the horizontal labels' stylesheet: 8px along the text, 4px across
-    PAD_ALONG = 8
-    PAD_ACROSS = 4
-
-    def __init__(
-        self,
-        text: str,
-        font: QFont,
-        font_color: str,
-        background_rgba: tuple[int, int, int, int],
-        parent: QWidget | None = None,
-    ):
-        super().__init__(parent)
-        self._text = text
-        self._font = font
-        self._font_color = font_color
-        self._background_rgba = background_rgba
-        metrics = QFontMetrics(font)
-        self.resize(
-            metrics.height() + 2 * self.PAD_ACROSS,
-            metrics.horizontalAdvance(text) + 2 * self.PAD_ALONG,
-        )
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(*self._background_rgba))
-        painter.drawRoundedRect(self.rect(), 4, 4)
-        # Rotate 90° clockwise: x now runs down the widget, y runs left
-        painter.translate(self.width(), 0)
-        painter.rotate(90)
-        painter.setFont(self._font)
-        painter.setPen(QColor(self._font_color))
-        painter.drawText(
-            QRect(0, 0, self.height(), self.width()),
-            Qt.AlignmentFlag.AlignCenter,
-            self._text,
-        )
+def _wrap_text(text: str, metrics: QFontMetrics, max_width: int) -> str:
+    """Greedily wrap text into lines no wider than max_width pixels."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if current and metrics.horizontalAdvance(candidate) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
 
 
 class InplaceOverlayBase(QWidget):
@@ -389,28 +357,48 @@ class InplaceOverlayBase(QWidget):
         r, g, b = int(bg_color[0:2], 16), int(bg_color[2:4], 16), int(bg_color[4:6], 16)
         a = int(self._background_opacity * 255)
 
+        label_style = (
+            f"color: {self._font_color}; "
+            f"background-color: rgba({r}, {g}, {b}, {a}); "
+            "padding: 4px 8px; "
+            "border-radius: 4px;"
+        )
+
         # Create new labels
         for text, bbox in regions:
             if not bbox:
                 continue
-            if self._vertical_text and bbox.get("height", 0) > bbox.get("width", 0):
-                # Tall, narrow region = vertical source text: rotate the translation
-                label = VerticalLabel(text, self._create_font(), self._font_color, (r, g, b, a), self)
-            else:
-                label = QLabel(text, self)
-                label.setFont(self._create_font())
-                label.setStyleSheet(
-                    f"color: {self._font_color}; "
-                    f"background-color: rgba({r}, {g}, {b}, {a}); "
-                    "padding: 4px 8px; "
-                    "border-radius: 4px;"
-                )
-                label.adjustSize()
             # Position at bbox location, converting from pixels to points
             # OCR returns coordinates in captured image pixels (physical pixels)
             # Qt uses logical pixels (points), so divide by scale factor
             x = int(bbox.get("x", 0) / scale) + content_offset_x
             y = int(bbox.get("y", 0) / scale) + content_offset_y
+
+            font = self._create_font()
+            display_text = text
+            if self._vertical_text and bbox.get("height", 0) > bbox.get("width", 0):
+                # Tall, narrow region = vertical source text. A single horizontal
+                # line would overflow the frame, so wrap it into a compact block
+                # and center that block on the original column.
+                metrics = QFontMetrics(font)
+                line_width = metrics.horizontalAdvance(text)
+                line_height = metrics.height()
+                # Aim for a readable block roughly twice as wide as it is tall
+                target_width = int(max(line_height * 6, (line_width * line_height * 2.0) ** 0.5))
+                if line_width > target_width:
+                    display_text = _wrap_text(text, metrics, target_width)
+
+            label = QLabel(display_text, self)
+            label.setFont(font)
+            label.setStyleSheet(label_style)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.adjustSize()
+
+            if display_text is not text:
+                # Center the wrapped block horizontally on the vertical column
+                bbox_center_x = int((bbox.get("x", 0) + bbox.get("width", 0) / 2) / scale) + content_offset_x
+                x = max(0, bbox_center_x - label.width() // 2)
+
             label.move(x, y)
             label.show()
             self._labels.append(label)
@@ -463,7 +451,7 @@ class InplaceOverlayBase(QWidget):
             self.set_regions(self._last_regions, self._last_content_offset)
 
     def set_vertical_text(self, enabled: bool):
-        """Enable/disable rotated display over vertical text regions and re-render."""
+        """Enable/disable wrapped display over vertical text regions and re-render."""
         self._vertical_text = enabled
         if self._last_regions:
             self.set_regions(self._last_regions, self._last_content_offset)

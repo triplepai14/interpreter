@@ -70,7 +70,7 @@ class Config:
         self.exclusion_zones = exclusion_zones if exclusion_zones is not None else {}
         # Per-window OCR confidence: {"window_title": 0.55, ...}
         self.ocr_confidence_per_window = ocr_confidence_per_window if ocr_confidence_per_window is not None else {}
-        # Inplace mode: render translations rotated 90° over vertical (tall) text regions
+        # Inplace mode: wrap translations into a multi-line block over vertical (tall) text regions
         self.vertical_text = vertical_text
 
     @classmethod
