@@ -558,7 +558,7 @@ class LinuxCaptureStream:
     CAPTURE_TIME_WARNING_MS = 100  # Warn if capture takes longer than this
     CAPTURE_TIME_SAMPLE_COUNT = 5  # Number of frames to sample for average
 
-    def __init__(self, window_id: int, capture_interval: float = 0.25):
+    def __init__(self, window_id: int, capture_interval: float = 0.1):
         """Initialize the capture stream.
 
         Args:

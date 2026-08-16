@@ -161,7 +161,7 @@ class WindowCapture:
     def __init__(
         self,
         window_title: str,
-        capture_interval: float = 0.25,
+        capture_interval: float = 0.1,
         window_id: int | None = None,
         bounds: dict | None = None,
     ):

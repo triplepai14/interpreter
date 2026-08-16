@@ -14,8 +14,8 @@ from numpy.typing import NDArray
 
 from .convert import bgra_to_rgb_pil
 
-# Fixed capture interval (4 FPS) - throttle Windows Graphics Capture API
-CAPTURE_INTERVAL = 0.25
+# Fixed capture interval (10 FPS) - throttle Windows Graphics Capture API
+CAPTURE_INTERVAL = 0.1
 
 # Windows build number requirements for Graphics Capture API features
 # - Build 18362 (Win10 1903): Basic Windows Graphics Capture API

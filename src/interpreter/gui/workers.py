@@ -242,26 +242,22 @@ class ProcessWorker(QObject):
         if self._mode == OverlayMode.INPLACE:
             translated_regions = []
             all_cached = True
-            for region in regions:
-                if self._translator and region.text:
-                    # Skip non-Japanese regions
-                    if not contains_japanese(region.text):
-                        logger.debug(
-                            "skipping region - no Japanese characters",
-                            text=region.text[:30],
-                        )
-                        continue
-                    try:
-                        translated, cached = self._translator.translate(region.text)
+
+            # Skip non-Japanese regions, then translate the rest as one batch
+            jp_regions = [
+                r for r in regions if r.text and contains_japanese(r.text)
+            ]
+            if self._translator and jp_regions:
+                try:
+                    batch = self._translator.translate_many([r.text for r in jp_regions])
+                    for region, (translated, cached) in zip(jp_regions, batch):
                         if not cached:
                             all_cached = False
-                    except Exception as e:
-                        logger.warning("Translation error", error=str(e), text=region.text[:50])
-                        translated = region.text
-                        all_cached = False
-                else:
-                    continue
-                translated_regions.append((translated, region.bbox))
+                        translated_regions.append((translated, region.bbox))
+                except Exception as e:
+                    logger.warning("Translation error", error=str(e))
+                    all_cached = False
+                    translated_regions = [(r.text, r.bbox) for r in jp_regions]
             translate_ms = int((time.perf_counter() - translate_start) * 1000)
             was_cached = all_cached and len(translated_regions) > 0
 

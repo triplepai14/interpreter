@@ -122,7 +122,7 @@ class WaylandCaptureStream:
     Frames are returned as numpy arrays in BGRA format.
     """
 
-    def __init__(self, fd: int, node_id: int, width: int, height: int, capture_interval: float = 0.25):
+    def __init__(self, fd: int, node_id: int, width: int, height: int, capture_interval: float = 0.1):
         """Initialize the capture stream.
 
         Args:

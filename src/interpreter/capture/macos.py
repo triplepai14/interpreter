@@ -14,8 +14,8 @@ from .. import log
 
 logger = log.get_logger()
 
-# Fixed capture interval (4 FPS)
-CAPTURE_INTERVAL = 0.25
+# Fixed capture interval (10 FPS)
+CAPTURE_INTERVAL = 0.1
 
 
 def _get_macos_version() -> str:

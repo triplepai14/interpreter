@@ -1,5 +1,8 @@
 """Main application window with settings and controls."""
 
+import time
+
+import numpy as np
 from PIL import ImageDraw
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QKeySequence, QPixmap
@@ -46,8 +49,15 @@ logger = log.get_logger()
 MIN_FONT_SIZE = 8
 MAX_FONT_SIZE = 72
 
-# Fixed processing interval (2 FPS)
-PROCESS_INTERVAL_MS = 500
+# Fixed processing interval
+PROCESS_INTERVAL_MS = 150
+
+# Unchanged frames are skipped, but a frame is force-reprocessed at least this
+# often so settings changes (confidence, exclusion zones) still take effect.
+FORCE_REPROCESS_MS = 2000
+
+# Subsampling stride for frame change detection (compare every Nth pixel)
+CHANGE_DETECT_STRIDE = 8
 
 
 class MainWindow(QMainWindow):
@@ -113,11 +123,14 @@ class MainWindow(QMainWindow):
             # Ensure banner is visible (handles monitor changes, resolution changes, etc.)
             self._banner_overlay.clamp_to_visible_area()
 
-        # Main processing timer (fixed 2 FPS)
+        # Main processing timer
         self._process_timer = QTimer()
         self._process_timer.timeout.connect(self._capture_and_process)
         self._last_frame = None
         self._last_bounds = {}
+        # Frame change detection state (skip OCR on unchanged frames)
+        self._last_frame_sample = None
+        self._last_process_time = 0.0
 
         self._setup_ui()
         # Auto-size window to fit all widgets, then lock minimum size
@@ -616,7 +629,8 @@ class MainWindow(QMainWindow):
             self._capture = None
             return
 
-        # Start single timer for capture + processing (fixed 2 FPS)
+        # Start single timer for capture + processing
+        self._last_frame_sample = None
         self._process_timer.setInterval(PROCESS_INTERVAL_MS)
         self._process_timer.start()
 
@@ -687,6 +701,7 @@ class MainWindow(QMainWindow):
             self._capture.start()
 
             # Start processing timer
+            self._last_frame_sample = None
             self._process_timer.setInterval(PROCESS_INTERVAL_MS)
             self._process_timer.start()
 
@@ -772,6 +787,8 @@ class MainWindow(QMainWindow):
             self._inplace_overlay.hide()
         else:
             self._pause_btn.setText("Hide")
+            # Force next frame to be reprocessed so the overlay repopulates immediately
+            self._last_frame_sample = None
             self._show_overlay()
 
     def _toggle_mode(self):
@@ -937,6 +954,25 @@ class MainWindow(QMainWindow):
         self._last_frame = frame
         self._last_bounds = bounds
 
+        # Update inplace overlay position if window moved (X11 only - Wayland doesn't have bounds)
+        if self._mode == OverlayMode.INPLACE and bounds and not self._paused:
+            self._inplace_overlay.position_over_window(bounds)
+
+        # Skip unchanged frames: compare a coarse subsample against the last
+        # processed frame so a fast timer doesn't burn CPU on static content.
+        # Force reprocessing periodically so settings changes still apply.
+        sample = frame[::CHANGE_DETECT_STRIDE, ::CHANGE_DETECT_STRIDE]
+        now = time.monotonic()
+        unchanged = (
+            self._last_frame_sample is not None
+            and sample.shape == self._last_frame_sample.shape
+            and np.array_equal(sample, self._last_frame_sample)
+        )
+        if unchanged and (now - self._last_process_time) * 1000 < FORCE_REPROCESS_MS:
+            return
+        self._last_frame_sample = sample.copy()
+        self._last_process_time = now
+
         # Update preview (convert BGRA numpy to PIL RGB, scale to fit max 320 width)
         preview = bgra_to_rgb_pil(frame)
         frame_h, frame_w = frame.shape[:2]
@@ -971,10 +1007,6 @@ class MainWindow(QMainWindow):
         # Update exclusion editor dialog if open
         if self._ocr_config_dialog:
             self._ocr_config_dialog.update_frame(frame)
-
-        # Update inplace overlay position if window moved (X11 only - Wayland doesn't have bounds)
-        if self._mode == OverlayMode.INPLACE and bounds and not self._paused:
-            self._inplace_overlay.position_over_window(bounds)
 
         # Apply exclusion zones before OCR
         frame_for_ocr = self._apply_exclusion_zones(frame)

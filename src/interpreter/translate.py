@@ -112,6 +112,26 @@ def _get_sugoi_model_path() -> Path:
     return model_path
 
 
+def _normalize_output(result: str) -> str:
+    """Normalize Unicode characters to ASCII equivalents (fixes rendering issues)."""
+    return (
+        result
+        # Curly quotes -> straight quotes
+        .replace("‘", "'")  # LEFT SINGLE QUOTATION MARK
+        .replace("’", "'")  # RIGHT SINGLE QUOTATION MARK
+        .replace("“", '"')  # LEFT DOUBLE QUOTATION MARK
+        .replace("”", '"')  # RIGHT DOUBLE QUOTATION MARK
+        # Dashes
+        .replace("–", "-")  # EN DASH
+        .replace("—", "--")  # EM DASH
+        .replace("−", "-")  # MINUS SIGN
+        # Spaces
+        .replace(" ", " ")  # NO-BREAK SPACE
+        # Ellipsis
+        .replace("…", "...")  # HORIZONTAL ELLIPSIS
+    )
+
+
 def text_similarity(a: str, b: str) -> float:
     """Calculate similarity ratio between two strings (0.0 to 1.0)."""
     if not a or not b:
@@ -250,54 +270,59 @@ class Translator:
         Returns:
             Tuple of (translated English text, was_cached).
         """
-        if not text or not text.strip():
-            return "", False
+        return self.translate_many([text])[0]
 
-        # Check cache first (includes fuzzy matching)
-        cached = self._cache.get(text)
-        if cached is not None:
-            return cached, True
+    def translate_many(self, texts: list[str]) -> list[tuple[str, bool]]:
+        """Translate multiple Japanese texts to English in a single model call.
 
-        # Ensure model is loaded
-        if self._translator is None:
-            self.load()
+        Cache hits are served individually; all cache misses are translated
+        together in one translate_batch call, which is much faster than
+        translating each text in a separate call.
 
-        # Tokenize input
-        tokens = self._tokenizer.EncodeAsPieces(text)
+        Args:
+            texts: Japanese texts to translate.
 
-        # Translate
-        results = self._translator.translate_batch(
-            [tokens],
-            beam_size=5,
-            max_decoding_length=256,
-        )
+        Returns:
+            List of (translated English text, was_cached), one per input.
+        """
+        results: list[tuple[str, bool] | None] = [None] * len(texts)
+        miss_indices: list[int] = []
 
-        # Decode output - join tokens and clean up SentencePiece markers
-        translated_tokens = results[0].hypotheses[0]
-        result = "".join(translated_tokens).replace("▁", " ").strip()
+        for i, text in enumerate(texts):
+            if not text or not text.strip():
+                results[i] = ("", False)
+                continue
+            # Check cache first (includes fuzzy matching)
+            cached = self._cache.get(text)
+            if cached is not None:
+                results[i] = (cached, True)
+            else:
+                miss_indices.append(i)
 
-        # Normalize Unicode characters to ASCII equivalents (fixes rendering issues)
-        result = (
-            result
-            # Curly quotes → straight quotes
-            .replace("\u2018", "'")  # LEFT SINGLE QUOTATION MARK
-            .replace("\u2019", "'")  # RIGHT SINGLE QUOTATION MARK
-            .replace("\u201c", '"')  # LEFT DOUBLE QUOTATION MARK
-            .replace("\u201d", '"')  # RIGHT DOUBLE QUOTATION MARK
-            # Dashes
-            .replace("\u2013", "-")  # EN DASH
-            .replace("\u2014", "--")  # EM DASH
-            .replace("\u2212", "-")  # MINUS SIGN
-            # Spaces
-            .replace("\u00a0", " ")  # NO-BREAK SPACE
-            # Ellipsis
-            .replace("\u2026", "...")  # HORIZONTAL ELLIPSIS
-        )
+        if miss_indices:
+            # Ensure model is loaded
+            if self._translator is None:
+                self.load()
 
-        # Store in cache
-        self._cache.put(text, result)
+            # Tokenize inputs and translate them all in one batch
+            token_batch = [self._tokenizer.EncodeAsPieces(texts[i]) for i in miss_indices]
+            batch_results = self._translator.translate_batch(
+                token_batch,
+                beam_size=5,
+                max_decoding_length=256,
+            )
 
-        return result, False
+            for i, batch_result in zip(miss_indices, batch_results):
+                # Decode output - join tokens and clean up SentencePiece markers
+                translated_tokens = batch_result.hypotheses[0]
+                result = "".join(translated_tokens).replace("▁", " ").strip()
+                result = _normalize_output(result)
+
+                # Store in cache
+                self._cache.put(texts[i], result)
+                results[i] = (result, False)
+
+        return results
 
     def is_loaded(self) -> bool:
         """Check if the translation model is loaded.
