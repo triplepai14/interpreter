@@ -76,8 +76,9 @@ class ProcessWorker(QObject):
     # Banner mode: single translated text
     text_ready = Signal(str)
 
-    # Inplace mode: list of (text, bbox) regions
-    regions_ready = Signal(list)
+    # Inplace mode: list of (text, bbox) regions, plus the downsampled sample
+    # of the source frame (for stale-position detection)
+    regions_ready = Signal(list, object)
 
     # Raw OCR results (list of OCRResult) - emitted before translation for visualization
     ocr_results_ready = Signal(list)
@@ -132,10 +133,16 @@ class ProcessWorker(QObject):
         self._frame_buffer.close()
         self._thread = None
 
-    def submit_frame(self, frame):
-        """Send a frame for processing (non-blocking)."""
+    def submit_frame(self, frame, sample=None):
+        """Send a frame for processing (non-blocking).
+
+        Args:
+            frame: BGRA frame to process.
+            sample: Optional downsampled copy of the source frame, echoed back
+                    with inplace results so stale positions can be detected.
+        """
         if self._running:
-            self._frame_buffer.put(frame)
+            self._frame_buffer.put((frame, sample))
 
     def has_failed_models(self) -> bool:
         """Check if any models failed to load."""
@@ -189,13 +196,13 @@ class ProcessWorker(QObject):
         # Only process frames if both models loaded successfully
         if not self._ocr_failed and not self._translation_failed:
             while self._running:
-                frame = self._frame_buffer.get(timeout=0.5)
-                if frame is not None:
-                    self._process_frame(frame)
+                item = self._frame_buffer.get(timeout=0.5)
+                if item is not None:
+                    self._process_frame(*item)
 
         logger.debug("worker thread stopped")
 
-    def _process_frame(self, frame):
+    def _process_frame(self, frame, sample=None):
         """Process a frame through OCR and translation."""
         if self._ocr is None:
             return
@@ -223,7 +230,7 @@ class ProcessWorker(QObject):
 
         if not text:
             if self._mode == OverlayMode.INPLACE:
-                self.regions_ready.emit([])
+                self.regions_ready.emit([], sample)
             else:
                 self.text_ready.emit("")
             return
@@ -232,7 +239,7 @@ class ProcessWorker(QObject):
         if not contains_japanese(text):
             logger.debug("skipping translation - no Japanese characters detected")
             if self._mode == OverlayMode.INPLACE:
-                self.regions_ready.emit([])
+                self.regions_ready.emit([], sample)
             else:
                 self.text_ready.emit("")
             return
@@ -261,7 +268,7 @@ class ProcessWorker(QObject):
             translate_ms = int((time.perf_counter() - translate_start) * 1000)
             was_cached = all_cached and len(translated_regions) > 0
 
-            self.regions_ready.emit(translated_regions)
+            self.regions_ready.emit(translated_regions, sample)
         else:
             if self._translator:
                 try:

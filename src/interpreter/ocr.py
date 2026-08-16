@@ -180,8 +180,15 @@ class OCR:
         # Convert clusters to OCRResult objects
         regions = []
         for cluster in clusters:
-            # Sort lines top-to-bottom for reading order
-            cluster.sort(key=lambda line: line["bbox"][1])
+            # Sort lines in reading order. Vertical columns (taller than wide,
+            # as in manga) read right-to-left; horizontal lines top-to-bottom.
+            vertical_lines = sum(
+                1 for line in cluster if (line["bbox"][3] - line["bbox"][1]) > (line["bbox"][2] - line["bbox"][0])
+            )
+            if vertical_lines * 2 > len(cluster):
+                cluster.sort(key=lambda line: -line["bbox"][2])
+            else:
+                cluster.sort(key=lambda line: line["bbox"][1])
 
             # Combine text from lines
             text = "".join(line["text"] for line in cluster)
@@ -273,9 +280,13 @@ class OCR:
 
         for line in lines:
             x1, y1, x2, y2 = line["bbox"]
-            line_height = y2 - y1
+            # Use the character size (short side), not the line length: for
+            # horizontal lines that is the height, for vertical columns (manga)
+            # it is the width. Using the long side of a vertical column would
+            # merge separate speech bubbles across half the page.
+            char_size = min(x2 - x1, y2 - y1)
 
-            h_threshold = line_height * SPATIAL_PROXIMITY_MULTIPLIER
+            h_threshold = char_size * SPATIAL_PROXIMITY_MULTIPLIER
 
             # Find a cluster this line belongs to
             merged = False

@@ -60,6 +60,11 @@ FORCE_REPROCESS_MS = 2000
 # Subsampling stride for frame change detection (compare every Nth pixel)
 CHANGE_DETECT_STRIDE = 8
 
+# Fraction of sampled pixels that must differ for content to count as
+# scrolled/replaced. Above this, inplace label positions are no longer valid:
+# pending OCR results are discarded and displayed labels are cleared.
+SCROLL_CHANGE_FRACTION = 0.4
+
 
 class MainWindow(QMainWindow):
     """Main application window."""
@@ -133,6 +138,8 @@ class MainWindow(QMainWindow):
         # Frame change detection state (skip OCR on unchanged frames)
         self._last_frame_sample = None
         self._last_process_time = 0.0
+        # Sample of the previous tick's frame (scroll detection)
+        self._prev_tick_sample = None
 
         self._setup_ui()
         # Auto-size window to fit all widgets, then lock minimum size
@@ -643,6 +650,7 @@ class MainWindow(QMainWindow):
 
         # Start single timer for capture + processing
         self._last_frame_sample = None
+        self._prev_tick_sample = None
         self._process_timer.setInterval(PROCESS_INTERVAL_MS)
         self._process_timer.start()
 
@@ -714,6 +722,7 @@ class MainWindow(QMainWindow):
 
             # Start processing timer
             self._last_frame_sample = None
+            self._prev_tick_sample = None
             self._process_timer.setInterval(PROCESS_INTERVAL_MS)
             self._process_timer.start()
 
@@ -970,10 +979,23 @@ class MainWindow(QMainWindow):
         if self._mode == OverlayMode.INPLACE and bounds and not self._paused:
             self._inplace_overlay.position_over_window(bounds)
 
+        sample = frame[::CHANGE_DETECT_STRIDE, ::CHANGE_DETECT_STRIDE].copy()
+
+        # While the content is scrolling, displayed inplace labels sit at stale
+        # positions - clear them until the content settles again.
+        if (
+            self._mode == OverlayMode.INPLACE
+            and not self._paused
+            and self._prev_tick_sample is not None
+            and sample.shape == self._prev_tick_sample.shape
+            and float(np.mean(np.any(sample != self._prev_tick_sample, axis=2))) >= SCROLL_CHANGE_FRACTION
+        ):
+            self._inplace_overlay.clear_regions()
+        self._prev_tick_sample = sample
+
         # Skip unchanged frames: compare a coarse subsample against the last
         # processed frame so a fast timer doesn't burn CPU on static content.
         # Force reprocessing periodically so settings changes still apply.
-        sample = frame[::CHANGE_DETECT_STRIDE, ::CHANGE_DETECT_STRIDE]
         now = time.monotonic()
         unchanged = (
             self._last_frame_sample is not None
@@ -982,7 +1004,7 @@ class MainWindow(QMainWindow):
         )
         if unchanged and (now - self._last_process_time) * 1000 < FORCE_REPROCESS_MS:
             return
-        self._last_frame_sample = sample.copy()
+        self._last_frame_sample = sample
         self._last_process_time = now
 
         # Update preview (convert BGRA numpy to PIL RGB, scale to fit max 320 width)
@@ -1025,21 +1047,32 @@ class MainWindow(QMainWindow):
 
         # Process through OCR and translation (on worker thread)
         if not self._paused:
-            self._process_worker.submit_frame(frame_for_ocr)
+            self._process_worker.submit_frame(frame_for_ocr, sample)
 
     def _on_text_ready(self, translated: str):
         """Handle translated text (banner mode)."""
         if not self._paused:
             self._banner_overlay.set_text(translated)
 
-    def _on_regions_ready(self, regions: list):
+    def _on_regions_ready(self, regions: list, sample=None):
         """Handle translated regions (inplace mode)."""
-        if not self._paused:
-            # Get content offset from capture (accounts for window decorations)
-            content_offset = (0, 0)
-            if self._capture:
-                content_offset = self._capture.get_content_offset()
-            self._inplace_overlay.set_regions(regions, content_offset)
+        if self._paused:
+            return
+        # Discard results whose source frame no longer matches the screen
+        # (user scrolled while OCR was running) - positions would be stale.
+        # The next processed frame will place them correctly.
+        if sample is not None and self._last_frame is not None:
+            current = self._last_frame[::CHANGE_DETECT_STRIDE, ::CHANGE_DETECT_STRIDE]
+            if current.shape == sample.shape and (
+                float(np.mean(np.any(current != sample, axis=2))) >= SCROLL_CHANGE_FRACTION
+            ):
+                self._inplace_overlay.clear_regions()
+                return
+        # Get content offset from capture (accounts for window decorations)
+        content_offset = (0, 0)
+        if self._capture:
+            content_offset = self._capture.get_content_offset()
+        self._inplace_overlay.set_regions(regions, content_offset)
 
     def _on_ocr_results_ready(self, results: list):
         """Handle raw OCR results (for OCR config dialog visualization)."""
