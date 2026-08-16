@@ -65,6 +65,10 @@ CHANGE_DETECT_STRIDE = 8
 # pending OCR results are discarded and displayed labels are cleared.
 SCROLL_CHANGE_FRACTION = 0.4
 
+# Below this change fraction, treat the frame as static (noise floor);
+# between the two thresholds, vertical-shift detection decides.
+SCROLL_MIN_CHANGE_FRACTION = 0.02
+
 
 class MainWindow(QMainWindow):
     """Main application window."""
@@ -986,9 +990,7 @@ class MainWindow(QMainWindow):
         if (
             self._mode == OverlayMode.INPLACE
             and not self._paused
-            and self._prev_tick_sample is not None
-            and sample.shape == self._prev_tick_sample.shape
-            and float(np.mean(np.any(sample != self._prev_tick_sample, axis=2))) >= SCROLL_CHANGE_FRACTION
+            and self._content_moved(self._prev_tick_sample, sample)
         ):
             self._inplace_overlay.clear_regions()
         self._prev_tick_sample = sample
@@ -1049,6 +1051,60 @@ class MainWindow(QMainWindow):
         if not self._paused:
             self._process_worker.submit_frame(frame_for_ocr, sample)
 
+    def _content_moved(self, old_sample, new_sample) -> bool:
+        """Check whether content scrolled/changed enough to invalidate positions.
+
+        Large pixel-change fractions always count as moved. Smaller changes
+        (pages with large flat areas change few sampled pixels when scrolled)
+        count as moved only if the content shows a clear vertical shift.
+        """
+        if old_sample is None or new_sample is None:
+            return False
+        if old_sample.shape != new_sample.shape:
+            return True
+
+        changed = float(np.mean(np.any(old_sample != new_sample, axis=2)))
+        if changed >= SCROLL_CHANGE_FRACTION:
+            return True
+        if changed < SCROLL_MIN_CHANGE_FRACTION:
+            return False
+
+        return self._detect_vertical_shift(old_sample, new_sample)
+
+    @staticmethod
+    def _detect_vertical_shift(old_sample, new_sample) -> bool:
+        """Detect whether the content shifted vertically between two samples.
+
+        Compares per-row brightness profiles at every candidate shift; a
+        nonzero shift that matches clearly better than no shift means the
+        content scrolled (positions are stale even if few pixels changed).
+        """
+        old_profile = old_sample.astype(np.float32).mean(axis=(1, 2))
+        new_profile = new_sample.astype(np.float32).mean(axis=(1, 2))
+        n = len(old_profile)
+        max_shift = n // 2
+        if max_shift < 2:
+            return False
+
+        zero_error = float(np.mean(np.abs(old_profile - new_profile)))
+        if zero_error < 1.0:
+            # Profiles nearly identical - no visible movement
+            return False
+
+        best_error = None
+        for shift in range(-max_shift, max_shift + 1):
+            if shift == 0:
+                continue
+            if shift > 0:
+                a, b = old_profile[shift:], new_profile[: n - shift]
+            else:
+                a, b = old_profile[: n + shift], new_profile[-shift:]
+            error = float(np.mean(np.abs(a - b)))
+            if best_error is None or error < best_error:
+                best_error = error
+
+        return best_error is not None and best_error < zero_error * 0.5
+
     def _on_text_ready(self, translated: str):
         """Handle translated text (banner mode)."""
         if not self._paused:
@@ -1063,9 +1119,7 @@ class MainWindow(QMainWindow):
         # The next processed frame will place them correctly.
         if sample is not None and self._last_frame is not None:
             current = self._last_frame[::CHANGE_DETECT_STRIDE, ::CHANGE_DETECT_STRIDE]
-            if current.shape == sample.shape and (
-                float(np.mean(np.any(current != sample, axis=2))) >= SCROLL_CHANGE_FRACTION
-            ):
+            if self._content_moved(sample, current):
                 self._inplace_overlay.clear_regions()
                 return
         # Get content offset from capture (accounts for window decorations)

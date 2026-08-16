@@ -13,11 +13,59 @@ logger = log.get_logger()
 # Detection thresholds
 DEFAULT_CONFIDENCE_THRESHOLD = 0.6  # Minimum avg confidence per line (0.0-1.0)
 DUPLICATE_OVERLAP_THRESHOLD = 0.5  # Lines with >50% bbox overlap are duplicates
-SPATIAL_PROXIMITY_MULTIPLIER = 1.5  # Gap threshold = height * this value
+SPATIAL_PROXIMITY_MULTIPLIER = 1.5  # Gap threshold = character size * this value
+FURIGANA_SIZE_RATIO = 0.6  # Kana-only lines smaller than this fraction of the largest line are ruby text
+EDGE_CUTOFF_MARGIN = 3  # Regions within this many pixels of the top/bottom edge are considered cut off
 
 # Punctuation characters to exclude from confidence calculation
 # These often have lower OCR confidence but shouldn't invalidate the line
 PUNCTUATION = set("。、！？・…「」『』（）【】〈〉《》～ー－—.!?,;:'\"()-~")
+
+
+def _char_size(bbox: list) -> int:
+    """Character size of a line: the short side of its bbox.
+
+    For horizontal lines that is the height, for vertical columns the width.
+    """
+    return min(bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def _is_kana_only(text: str) -> bool:
+    """Check if text consists only of hiragana/katakana (ignoring punctuation)."""
+    chars = [c for c in text if c not in PUNCTUATION and not c.isspace()]
+    if not chars:
+        return False
+    return all(0x3040 <= ord(c) <= 0x30FF for c in chars)
+
+
+def _is_furigana(line: dict, cluster: list[dict]) -> bool:
+    """Check if a line is a furigana (ruby) annotation within its cluster.
+
+    Furigana is kana-only, much smaller than its base text, and sits
+    immediately to the right of its base column (vertical text) or
+    immediately above its base line (horizontal text). Plain kana-only
+    text columns are NOT furigana - position matters, not just size.
+    """
+    if not _is_kana_only(line["text"]):
+        return False
+    size = _char_size(line["bbox"])
+    lx1, ly1, lx2, ly2 = line["bbox"]
+    for other in cluster:
+        if other is line:
+            continue
+        other_size = _char_size(other["bbox"])
+        if size >= other_size * FURIGANA_SIZE_RATIO:
+            continue
+        ox1, oy1, ox2, oy2 = other["bbox"]
+        y_overlap = not (ly2 <= oy1 or ly1 >= oy2)
+        x_overlap = not (lx2 <= ox1 or lx1 >= ox2)
+        # Vertical text: ruby sits just right of its base column
+        if y_overlap and 0 <= lx1 - ox2 <= other_size:
+            return True
+        # Horizontal text: ruby sits just above its base line
+        if x_overlap and 0 <= oy1 - ly2 <= other_size:
+            return True
+    return False
 
 
 @dataclass
@@ -174,12 +222,28 @@ class OCR:
         if not lines:
             return []
 
+        # Drop furigana before clustering: small kana-only ruby annotations
+        # beside/above the main text would corrupt the translation input.
+        non_ruby = [line for line in lines if not _is_furigana(line, lines)]
+        if non_ruby:
+            lines = non_ruby
+
         # Cluster lines by spatial proximity
         clusters = self._cluster_lines(lines)
+
+        img_height = image.shape[0] if image is not None and hasattr(image, "shape") else None
 
         # Convert clusters to OCRResult objects
         regions = []
         for cluster in clusters:
+            # Skip regions cut off by the top/bottom frame edge (partially
+            # scrolled-off text produces garbage translations)
+            if img_height is not None:
+                min_y = min(line["bbox"][1] for line in cluster)
+                max_y = max(line["bbox"][3] for line in cluster)
+                if min_y <= EDGE_CUTOFF_MARGIN or max_y >= img_height - EDGE_CUTOFF_MARGIN:
+                    continue
+
             # Sort lines in reading order. Vertical columns (taller than wide,
             # as in manga) read right-to-left; horizontal lines top-to-bottom.
             vertical_lines = sum(
@@ -280,36 +344,40 @@ class OCR:
 
         for line in lines:
             x1, y1, x2, y2 = line["bbox"]
-            # Use the character size (short side), not the line length: for
-            # horizontal lines that is the height, for vertical columns (manga)
-            # it is the width. Using the long side of a vertical column would
-            # merge separate speech bubbles across half the page.
-            char_size = min(x2 - x1, y2 - y1)
+            char_size = _char_size(line["bbox"])
 
-            h_threshold = char_size * SPATIAL_PROXIMITY_MULTIPLIER
-
-            # Find a cluster this line belongs to
-            merged = False
+            # Find all clusters this line is close to (it may bridge several).
+            # The gap threshold uses the character size (short side of the
+            # bbox), not the line length: for horizontal lines that is the
+            # height, for vertical columns (manga) it is the width. Using the
+            # long side of a vertical column would merge separate speech
+            # bubbles across half the page. Take the max of both lines' sizes
+            # so a large-font column still merges with its small-font neighbor.
+            matching = []
             for cluster in clusters:
                 for existing in cluster:
                     ex1, ey1, ex2, ey2 = existing["bbox"]
+
+                    h_threshold = max(char_size, _char_size(existing["bbox"])) * SPATIAL_PROXIMITY_MULTIPLIER
 
                     # Check vertical overlap - must actually overlap
                     y_overlap = not (y2 <= ey1 or y1 >= ey2)
 
                     # Check horizontal proximity
                     h_gap = min(abs(x1 - ex2), abs(x2 - ex1))
-                    h_close = h_gap < h_threshold
 
-                    if y_overlap and h_close:
-                        cluster.append(line)
-                        merged = True
+                    if y_overlap and h_gap < h_threshold:
+                        matching.append(cluster)
                         break
 
-                if merged:
-                    break
-
-            if not merged:
+            if matching:
+                # Merge the line and any bridged clusters into one
+                target = matching[0]
+                target.append(line)
+                for other in matching[1:]:
+                    target.extend(other)
+                    clusters.remove(other)
+            else:
                 clusters.append([line])
 
         return clusters
